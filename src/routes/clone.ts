@@ -14,7 +14,44 @@ function extractFolderId(url: string) {
 import { db } from "../db/index.ts";
 import { cloneJobs } from "../db/schema.ts";
 import { randomUUID } from "crypto";
-import { cloneEngineQueue } from "../engine/cloneEngine.ts";
+import { cloneEngineQueue, processCloneJob } from "../engine/cloneEngine.ts";
+
+async function getFolderStatsRecursive(drive: any, folderId: string, depth = 0): Promise<{size: number, fileCount: number, folderCount: number}> {
+  if (depth > 10) return { size: 0, fileCount: 0, folderCount: 0 }; // limit depth to avoid infinite loops
+  let size = 0;
+  let fileCount = 0;
+  let folderCount = 0;
+  let pageToken = undefined;
+  try {
+    do {
+      const res = await drive.files.list({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: "nextPageToken, files(id, mimeType, size)",
+        pageToken: pageToken,
+        pageSize: 1000,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+      });
+      
+      for (const file of res.data.files || []) {
+        if (file.mimeType === "application/vnd.google-apps.folder") {
+          folderCount++;
+          const stats = await getFolderStatsRecursive(drive, file.id!, depth + 1);
+          size += stats.size;
+          fileCount += stats.fileCount;
+          folderCount += stats.folderCount;
+        } else {
+          fileCount++;
+          size += parseInt(file.size || "0", 10);
+        }
+      }
+      pageToken = res.data.nextPageToken;
+    } while (pageToken);
+  } catch (err) {
+    console.warn(`Error scanning folder ${folderId}:`, err);
+  }
+  return { size, fileCount, folderCount };
+}
 
 // Start clone job
 router.post("/start", async (req, res) => {
@@ -69,11 +106,10 @@ router.post("/analyze", async (req, res) => {
       supportsAllDrives: true,
     });
 
-    // 2. Count files inside (just a quick sample or full list)
-    // To avoid long delay, we might just fetch the first page. But let's fetch a summary if possible.
+    // 2. Count files inside
     const listRes = await drive.files.list({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: "files(id, mimeType, size)",
+      fields: "files(id, name, mimeType, size)",
       pageSize: 1000,
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
@@ -82,14 +118,35 @@ router.post("/analyze", async (req, res) => {
     let fileCount = 0;
     let folderCount = 0;
     let totalSize = 0;
+    let subfolders: { id: string, name: string, estimatedSize: number }[] = [];
+    const foldersToScan = [];
 
     for (const file of listRes.data.files || []) {
       if (file.mimeType === "application/vnd.google-apps.folder") {
         folderCount++;
+        foldersToScan.push(file);
       } else {
         fileCount++;
         totalSize += parseInt(file.size || "0", 10);
       }
+    }
+
+    const subfolderPromises = foldersToScan.map(async (folder) => {
+      const stats = await getFolderStatsRecursive(drive, folder.id!);
+      return {
+        id: folder.id!,
+        name: folder.name!,
+        estimatedSize: stats.size,
+        fileCount: stats.fileCount,
+        folderCount: stats.folderCount,
+      };
+    });
+    
+    subfolders = await Promise.all(subfolderPromises);
+    for (const sf of subfolders) {
+      totalSize += sf.estimatedSize;
+      fileCount += sf.fileCount;
+      folderCount += sf.folderCount;
     }
 
     res.json({ 
@@ -100,6 +157,7 @@ router.post("/analyze", async (req, res) => {
       fileCount,
       folderCount,
       estimatedSize: totalSize,
+      subfolders,
     });
   } catch (err: any) {
     console.error("Analyze error:", err);

@@ -120,7 +120,28 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isCloning, setIsCloning] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<any>(null);
+  const [selectedSubfolders, setSelectedSubfolders] = useState<string[]>([]);
+  const [wrapInFolder, setWrapInFolder] = useState(true);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+
+  const rootFilesSize = analysisResult ? analysisResult.estimatedSize - (analysisResult.subfolders?.reduce((acc: number, sf: any) => acc + sf.estimatedSize, 0) || 0) : 0;
+  const rootFileCount = analysisResult ? analysisResult.fileCount - (analysisResult.subfolders?.reduce((acc: number, sf: any) => acc + sf.fileCount, 0) || 0) : 0;
+  const rootFolderCount = analysisResult ? analysisResult.folderCount - (analysisResult.subfolders?.reduce((acc: number, sf: any) => acc + sf.folderCount, 0) || 0) : 0;
+  
+  const selectedSize = rootFilesSize + selectedSubfolders.reduce((acc: number, id: string) => {
+    const sf = analysisResult?.subfolders?.find((s: any) => s.id === id);
+    return acc + (sf?.estimatedSize || 0);
+  }, 0);
+
+  const selectedFileCount = rootFileCount + selectedSubfolders.reduce((acc: number, id: string) => {
+    const sf = analysisResult?.subfolders?.find((s: any) => s.id === id);
+    return acc + (sf?.fileCount || 0);
+  }, 0);
+
+  const selectedFolderCount = rootFolderCount + selectedSubfolders.length + selectedSubfolders.reduce((acc: number, id: string) => {
+    const sf = analysisResult?.subfolders?.find((s: any) => s.id === id);
+    return acc + (sf?.folderCount || 0);
+  }, 0);
 
   const [jobProgress, setJobProgress] = useState<any>(null);
   const [logs, setLogs] = useState<any[]>([]);
@@ -162,7 +183,10 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
           sourceId: analysisResult.folderId,
           destinationId: destId,
           options: {
-            concurrentThreads: 3
+            concurrentThreads: 3,
+            selectedSubfolders: selectedSubfolders,
+            wrapInFolder: wrapInFolder,
+            sourceName: analysisResult.name,
           }
         })
       });
@@ -196,6 +220,9 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
       const data = await res.json();
       if (res.ok) {
         setAnalysisResult(data);
+        if (data.subfolders) {
+          setSelectedSubfolders(data.subfolders.map((sf: any) => sf.id));
+        }
       } else {
         alert("Error: " + data.error);
       }
@@ -249,10 +276,65 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
                   <div className="text-neutral-500">Owner:</div>
                   <div className="font-medium truncate">{analysisResult.owner}</div>
                   <div className="text-neutral-500">Files / Folders:</div>
-                  <div className="font-medium">{analysisResult.fileCount} / {analysisResult.folderCount}</div>
+                  <div className="font-medium">{selectedFileCount} / {selectedFolderCount}</div>
                   <div className="text-neutral-500">Estimated Size:</div>
-                  <div className="font-medium">{(analysisResult.estimatedSize / 1024 / 1024).toFixed(2)} MB</div>
+                  <div className="font-medium">{(selectedSize / 1024 / 1024).toFixed(2)} MB</div>
                 </div>
+
+                {analysisResult.subfolders && analysisResult.subfolders.length > 0 && (
+                  <div className="mt-4">
+                    <h4 className="font-medium text-sm text-neutral-700 dark:text-neutral-300 mb-2">Select Subfolders to Clone</h4>
+                    <div className="border border-blue-200 dark:border-blue-800 rounded-md overflow-hidden max-h-48 overflow-y-auto bg-white dark:bg-neutral-900">
+                      <table className="w-full text-sm text-left">
+                        <thead className="bg-neutral-50 dark:bg-neutral-800/50 border-b border-blue-200 dark:border-blue-800">
+                          <tr>
+                            <th className="px-3 py-2 w-8">
+                              <input 
+                                type="checkbox" 
+                                className="rounded text-blue-600 focus:ring-blue-500"
+                                checked={selectedSubfolders.length === analysisResult.subfolders.length} 
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedSubfolders(analysisResult.subfolders.map((sf: any) => sf.id));
+                                  } else {
+                                    setSelectedSubfolders([]);
+                                  }
+                                }} 
+                              />
+                            </th>
+                            <th className="px-3 py-2">Name</th>
+                            <th className="px-3 py-2 text-right">Size</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-blue-100 dark:divide-blue-800/50">
+                          {analysisResult.subfolders.map((sf: any) => (
+                            <tr key={sf.id} className="hover:bg-blue-50/50 dark:hover:bg-blue-900/30">
+                              <td className="px-3 py-2">
+                                <input 
+                                  type="checkbox" 
+                                  className="rounded text-blue-600 focus:ring-blue-500"
+                                  checked={selectedSubfolders.includes(sf.id)} 
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedSubfolders([...selectedSubfolders, sf.id]);
+                                    } else {
+                                      setSelectedSubfolders(selectedSubfolders.filter(id => id !== sf.id));
+                                    }
+                                  }} 
+                                />
+                              </td>
+                              <td className="px-3 py-2 font-medium truncate max-w-[200px]">{sf.name}</td>
+                              <td className="px-3 py-2 text-right text-neutral-500 dark:text-neutral-400">{(sf.estimatedSize / 1024 / 1024).toFixed(2)} MB</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-3 text-sm text-neutral-600 dark:text-neutral-400 flex justify-between font-medium">
+                      <span>Selected Size: {(selectedSize / 1024 / 1024).toFixed(2)} MB</span>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -268,6 +350,17 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
                   placeholder="https://drive.google.com/drive/folders/..." 
                   className="flex-1 min-w-0 px-3 py-2 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
+              </div>
+              <div className="mt-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={wrapInFolder}
+                    onChange={(e) => setWrapInFolder(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500" 
+                  />
+                  <span className="text-sm text-neutral-600 dark:text-neutral-400">Tạo thư mục gốc với tên của thư mục nguồn tại đích (Create root folder wrapper)</span>
+                </label>
               </div>
             </div>
           </div>
@@ -343,14 +436,14 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
               </span>
               <span className="text-sm text-neutral-500">
                 {analysisResult && jobProgress?.copied !== undefined
-                  ? Math.round((jobProgress.copied / analysisResult.fileCount) * 100)
+                  ? Math.round((jobProgress.copied / selectedFileCount) * 100)
                   : 0}%
               </span>
             </div>
             <div className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-full overflow-hidden">
               <div 
                 className="h-full bg-blue-500 rounded-full transition-all duration-300" 
-                style={{ width: `${analysisResult && jobProgress?.copied !== undefined ? Math.round((jobProgress.copied / analysisResult.fileCount) * 100) : 0}%` }}
+                style={{ width: `${analysisResult && jobProgress?.copied !== undefined ? Math.round((jobProgress.copied / selectedFileCount) * 100) : 0}%` }}
               ></div>
             </div>
             {jobProgress?.currentFile && (
@@ -370,7 +463,7 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
               <div>
                 <div className="text-xs text-neutral-500 mb-1">Total Size</div>
                 <div className="font-mono font-medium">
-                  {analysisResult ? (analysisResult.estimatedSize / 1024 / 1024).toFixed(2) : 0} MB
+                  {analysisResult ? (selectedSize / 1024 / 1024).toFixed(2) : 0} MB
                 </div>
               </div>
               <div>

@@ -1,4 +1,4 @@
-import PQueue from "p-queue";
+import { TaskQueue } from "./queue.ts";
 import { google } from "googleapis";
 import { db } from "../db/index.ts";
 import { cloneJobs, cloneLogs } from "../db/schema.ts";
@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { io } from "../server.ts";
 
-export const cloneEngineQueue = new PQueue({ concurrency: 1 });
+export const cloneEngineQueue = new TaskQueue({ concurrency: 1 });
 
 export async function processCloneJob(jobId: string, accessToken: string, userId: string) {
   try {
@@ -23,7 +23,7 @@ export async function processCloneJob(jobId: string, accessToken: string, userId
     await logActivity(jobId, "INFO", "Started scanning source folder", job.sourceId || undefined);
 
     // Get all files
-    const allFiles = await scanFolder(drive, job.sourceId!);
+    const allFiles = await scanFolder(drive, job.sourceId!, (job.options as any)?.selectedSubfolders);
     
     await db.update(cloneJobs)
       .set({ totalFiles: allFiles.length, status: "COPYING" })
@@ -32,7 +32,7 @@ export async function processCloneJob(jobId: string, accessToken: string, userId
     await logActivity(jobId, "INFO", `Found ${allFiles.length} files to copy`);
 
     // We will use a dedicated queue for copying files
-    const copyQueue = new PQueue({ concurrency: job.options?.concurrentThreads || 3 });
+    const copyQueue = new TaskQueue({ concurrency: (job.options as any)?.concurrentThreads || 3 });
     
     let copied = 0;
     let failed = 0;
@@ -40,50 +40,80 @@ export async function processCloneJob(jobId: string, accessToken: string, userId
 
     // A mapping from source folder ID to destination folder ID
     const folderMapping = new Map<string, string>();
-    folderMapping.set(job.sourceId!, job.destinationId!);
+    
+    const options = job.options as any;
+    if (options?.wrapInFolder && options?.sourceName) {
+      try {
+        const createdRoot = await drive.files.create({
+          requestBody: {
+            name: options.sourceName,
+            mimeType: "application/vnd.google-apps.folder",
+            parents: [job.destinationId!],
+          },
+          supportsAllDrives: true,
+        });
+        folderMapping.set(job.sourceId!, createdRoot.data.id!);
+        await logActivity(jobId, "SUCCESS", `Created root folder wrapper: ${options.sourceName}`, createdRoot.data.id!);
+      } catch (err: any) {
+        await logActivity(jobId, "ERROR", `Failed to create root folder wrapper: ${err.message}`);
+        folderMapping.set(job.sourceId!, job.destinationId!);
+      }
+    } else {
+      folderMapping.set(job.sourceId!, job.destinationId!);
+    }
 
-    for (const file of allFiles) {
+    // Separate folders and files
+    const folders = allFiles.filter(f => f.mimeType === "application/vnd.google-apps.folder");
+    const files = allFiles.filter(f => f.mimeType !== "application/vnd.google-apps.folder");
+
+    // Process folders sequentially to ensure parent folders are created before child folders
+    for (const folder of folders) {
+      try {
+        const parentId = folder.resolvedParentId || job.sourceId!;
+        let destParentId = folderMapping.get(parentId) || job.destinationId!;
+        const created = await drive.files.create({
+          requestBody: {
+            name: folder.name,
+            mimeType: "application/vnd.google-apps.folder",
+            parents: [destParentId],
+          },
+          supportsAllDrives: true,
+        });
+        folderMapping.set(folder.id!, created.data.id!);
+        await logActivity(jobId, "SUCCESS", `Created folder: ${folder.name}`, created.data.id!);
+      } catch (e: any) {
+        failed++;
+        await logActivity(jobId, "ERROR", `Failed to create folder ${folder.name}: ${e.message}`, folder.id!);
+      }
+    }
+
+    for (const file of files) {
       copyQueue.add(async () => {
         try {
           // Resolve parent
-          const parentId = file.parents?.[0] || job.sourceId!;
+          const parentId = file.resolvedParentId || job.sourceId!;
           
-          if (file.mimeType === "application/vnd.google-apps.folder") {
-            // Need to create folder
-            let destParentId = folderMapping.get(parentId) || job.destinationId!;
-            const created = await drive.files.create({
-              requestBody: {
-                name: file.name,
-                mimeType: "application/vnd.google-apps.folder",
-                parents: [destParentId],
-              },
-              supportsAllDrives: true,
-            });
-            folderMapping.set(file.id!, created.data.id!);
-            await logActivity(jobId, "SUCCESS", `Created folder: ${file.name}`, created.data.id!);
-          } else {
-            // Copy file
-            let destParentId = folderMapping.get(parentId) || job.destinationId!;
-            const copiedFile = await drive.files.copy({
-              fileId: file.id!,
-              requestBody: {
-                parents: [destParentId],
-              },
-              supportsAllDrives: true,
-            });
-            copied++;
-            
-            // Emit realtime event
-            io.emit(`job_${jobId}`, {
-              type: "progress",
-              copied,
-              failed,
-              skipped,
-              currentFile: file.name
-            });
+          // Copy file
+          let destParentId = folderMapping.get(parentId) || job.destinationId!;
+          const copiedFile = await drive.files.copy({
+            fileId: file.id!,
+            requestBody: {
+              parents: [destParentId],
+            },
+            supportsAllDrives: true,
+          });
+          copied++;
+          
+          // Emit realtime event
+          io.emit(`job_${jobId}`, {
+            type: "progress",
+            copied,
+            failed,
+            skipped,
+            currentFile: file.name
+          });
 
-            await logActivity(jobId, "SUCCESS", `Copied file: ${file.name}`, copiedFile.data.id!);
-          }
+          await logActivity(jobId, "SUCCESS", `Copied file: ${file.name}`, copiedFile.data.id!);
         } catch (e: any) {
           failed++;
           await logActivity(jobId, "ERROR", `Failed to copy ${file.name}: ${e.message}`, file.id!);
@@ -119,7 +149,7 @@ async function logActivity(jobId: string, type: string, message: string, fileId?
 }
 
 // Recursively scan folder
-async function scanFolder(drive: any, folderId: string) {
+async function scanFolder(drive: any, folderId: string, allowedSubfolders?: string[], isRoot = true) {
   let allFiles: any[] = [];
   let pageToken = undefined;
 
@@ -133,9 +163,16 @@ async function scanFolder(drive: any, folderId: string) {
     });
     
     for (const file of res.data.files || []) {
-      allFiles.push(file);
+      const fileWithParent = { ...file, resolvedParentId: folderId };
+      if (isRoot && allowedSubfolders) {
+        if (file.mimeType === "application/vnd.google-apps.folder" && !allowedSubfolders.includes(file.id!)) {
+          continue; // Skip unselected subfolders
+        }
+      }
+      
+      allFiles.push(fileWithParent);
       if (file.mimeType === "application/vnd.google-apps.folder") {
-        const subFiles = await scanFolder(drive, file.id!);
+        const subFiles = await scanFolder(drive, file.id!, undefined, false);
         allFiles.push(...subFiles);
       }
     }

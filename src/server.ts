@@ -6,7 +6,6 @@ import { Server } from "socket.io";
 import { db } from "./db/index.ts";
 import { users, oauthTokens, cloneJobs, cloneLogs } from "./db/schema.ts";
 import { eq, desc } from "drizzle-orm";
-import PQueue from "p-queue";
 import { adminAuth } from "./lib/firebase-admin.ts";
 
 const app = express();
@@ -30,6 +29,24 @@ const requireAuth = async (req: any, res: any, next: any) => {
   try {
     const decodedToken = await adminAuth.verifyIdToken(token);
     req.user = decodedToken;
+
+    // Auto-upsert user to database to satisfy foreign keys
+    if (decodedToken.uid && decodedToken.email) {
+      await db.insert(users).values({
+        id: decodedToken.uid,
+        email: decodedToken.email,
+        name: decodedToken.name || null,
+        picture: decodedToken.picture || null,
+      }).onConflictDoUpdate({
+        target: users.id,
+        set: {
+          email: decodedToken.email,
+          name: decodedToken.name || null,
+          picture: decodedToken.picture || null,
+        }
+      });
+    }
+
     next();
   } catch (error) {
     console.error("Error verifying Firebase ID token:", error);
