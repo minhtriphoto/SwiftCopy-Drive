@@ -62,7 +62,7 @@ export default function App() {
           <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white">
             <Files size={18} />
           </div>
-          <h1 className="font-semibold text-lg tracking-tight">SwiftCopy Drive</h1>
+          <h1 className="font-semibold text-lg tracking-tight">Aura Lighitng</h1>
         </div>
         
         <div className="flex items-center gap-4">
@@ -96,7 +96,7 @@ export default function App() {
             <div className="w-16 h-16 rounded-2xl bg-blue-100 dark:bg-blue-900/30 text-blue-600 flex items-center justify-center mb-6">
               <Files size={32} />
             </div>
-            <h2 className="text-2xl font-semibold mb-2">Welcome to SwiftCopy</h2>
+            <h2 className="text-2xl font-semibold mb-2">Welcome to Aura Lighitng</h2>
             <p className="text-neutral-500 dark:text-neutral-400 mb-8">
               Clone entire Google Drive folders from public or shared links directly to your personal Drive securely and efficiently.
             </p>
