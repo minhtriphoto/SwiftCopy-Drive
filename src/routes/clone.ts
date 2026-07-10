@@ -118,7 +118,7 @@ router.post("/analyze", async (req, res) => {
     let fileCount = 0;
     let folderCount = 0;
     let totalSize = 0;
-    let subfolders: { id: string, name: string, estimatedSize: number }[] = [];
+    let subfolders: { id: string, name: string, estimatedSize: number, fileCount: number, folderCount: number }[] = [];
     const foldersToScan = [];
 
     for (const file of listRes.data.files || []) {

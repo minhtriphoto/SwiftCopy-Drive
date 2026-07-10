@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { initAuth, googleSignIn, logout, getAccessToken } from "./lib/firebase.ts";
 import { User } from "firebase/auth";
-import { Files, LogOut, Settings, Play, Database, HardDrive, History, File as FileIcon, Search, CheckSquare, Settings2, RotateCcw } from "lucide-react";
+import { Files, LogOut, Settings, Play, Database, HardDrive, History, File as FileIcon, Search, CheckSquare, Settings2, RotateCcw, ListPlus } from "lucide-react";
 import { cn } from "./lib/utils.ts";
 import { io } from "socket.io-client";
 
@@ -124,6 +124,12 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
   const [wrapInFolder, setWrapInFolder] = useState(true);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
+  const [concurrentThreads, setConcurrentThreads] = useState(3);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [eta, setEta] = useState<string>("--:--");
+  const [autoAnalyze, setAutoAnalyze] = useState(false);
+  const analyzedUrlRef = React.useRef("");
+
   const rootFilesSize = analysisResult ? analysisResult.estimatedSize - (analysisResult.subfolders?.reduce((acc: number, sf: any) => acc + sf.estimatedSize, 0) || 0) : 0;
   const rootFileCount = analysisResult ? analysisResult.fileCount - (analysisResult.subfolders?.reduce((acc: number, sf: any) => acc + sf.fileCount, 0) || 0) : 0;
   const rootFolderCount = analysisResult ? analysisResult.folderCount - (analysisResult.subfolders?.reduce((acc: number, sf: any) => acc + sf.folderCount, 0) || 0) : 0;
@@ -147,10 +153,26 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
   const [logs, setLogs] = useState<any[]>([]);
 
   useEffect(() => {
+    if (autoAnalyze && sourceUrl && sourceUrl !== analyzedUrlRef.current && !isAnalyzing) {
+      const timer = setTimeout(() => {
+        handleAnalyze();
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [sourceUrl, autoAnalyze, isAnalyzing]);
+
+  useEffect(() => {
     if (!activeJobId) return;
 
     const onProgress = (data: any) => {
-      setJobProgress((prev: any) => ({ ...prev, ...data }));
+      setJobProgress((prev: any) => {
+        if (!prev && data.copied !== undefined) {
+          setStartTime(Date.now());
+        } else if (prev && prev.copied === undefined && data.copied !== undefined) {
+          setStartTime(Date.now());
+        }
+        return { ...prev, ...data };
+      });
     };
 
     const onLog = (log: any) => {
@@ -166,9 +188,37 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
     };
   }, [activeJobId]);
 
+  useEffect(() => {
+    if (!startTime || !jobProgress || jobProgress.copied === undefined || !selectedFileCount) return;
+    
+    const interval = setInterval(() => {
+      const copied = jobProgress.copied;
+      if (copied === 0) return;
+      
+      const elapsedMs = Date.now() - startTime;
+      const msPerItem = elapsedMs / copied;
+      const remainingItems = selectedFileCount - copied;
+      if (remainingItems <= 0) {
+        setEta("00:00");
+        return;
+      }
+      
+      const remainingMs = remainingItems * msPerItem;
+      const remainingSecs = Math.floor(remainingMs / 1000);
+      const mins = Math.floor(remainingSecs / 60);
+      const secs = remainingSecs % 60;
+      setEta(`${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [startTime, jobProgress, selectedFileCount]);
+
   const handleStartClone = async () => {
     if (!analysisResult || !destUrl) return;
     setIsCloning(true);
+    setJobProgress(null);
+    setStartTime(null);
+    setEta("--:--");
     try {
       const destId = destUrl.match(/folders\/([a-zA-Z0-9_-]+)/)?.[1] || destUrl.match(/id=([a-zA-Z0-9_-]+)/)?.[1] || destUrl;
       const res = await fetch("/api/clone/start", {
@@ -183,7 +233,7 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
           sourceId: analysisResult.folderId,
           destinationId: destId,
           options: {
-            concurrentThreads: 3,
+            concurrentThreads: concurrentThreads,
             selectedSubfolders: selectedSubfolders,
             wrapInFolder: wrapInFolder,
             sourceName: analysisResult.name,
@@ -206,6 +256,7 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
 
   const handleAnalyze = async () => {
     if (!sourceUrl) return;
+    analyzedUrlRef.current = sourceUrl;
     setIsAnalyzing(true);
     try {
       const res = await fetch("/api/clone/analyze", {
@@ -264,6 +315,17 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
                 >
                   {isAnalyzing ? "Analyzing..." : "Analyze"}
                 </button>
+              </div>
+              <div className="mt-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={autoAnalyze} 
+                    onChange={(e) => setAutoAnalyze(e.target.checked)} 
+                    className="rounded text-blue-600 focus:ring-blue-500" 
+                  />
+                  <span className="text-sm text-neutral-600 dark:text-neutral-400">Auto Analyze URL</span>
+                </label>
               </div>
             </div>
 
@@ -351,7 +413,20 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
                   className="flex-1 min-w-0 px-3 py-2 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
               </div>
-              <div className="mt-2">
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  Luồng tải (Concurrent Threads): {concurrentThreads}
+                </label>
+                <input 
+                  type="range" 
+                  min="1" 
+                  max="10" 
+                  value={concurrentThreads}
+                  onChange={(e) => setConcurrentThreads(parseInt(e.target.value))}
+                  className="w-full accent-blue-600"
+                />
+              </div>
+              <div className="mt-4">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input 
                     type="checkbox" 
@@ -410,14 +485,24 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
         </div>
 
         <div className="p-4 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900">
-          <button 
-            onClick={handleStartClone}
-            disabled={!analysisResult || !destUrl || isCloning}
-            className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shadow-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-          >
-            <Play size={18} fill="currentColor" />
-            {isCloning ? "Starting..." : "Start Clone"}
-          </button>
+          <div className="flex gap-3">
+            <button 
+              onClick={() => {}}
+              disabled={!analysisResult || !destUrl || isCloning}
+              className="flex-1 py-3 bg-neutral-200 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 font-medium rounded-lg flex items-center justify-center gap-2 transition-colors disabled:opacity-50 hover:bg-neutral-300 dark:hover:bg-neutral-700"
+            >
+              <ListPlus size={18} />
+              Queue
+            </button>
+            <button 
+              onClick={handleStartClone}
+              disabled={!analysisResult || !destUrl || isCloning}
+              className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shadow-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+            >
+              <Play size={18} fill="currentColor" />
+              {isCloning ? "Starting..." : "Start Clone"}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -468,7 +553,7 @@ function Dashboard({ token, idToken, user }: { token: string; idToken: string; u
               </div>
               <div>
                 <div className="text-xs text-neutral-500 mb-1">ETA</div>
-                <div className="font-mono font-medium">--:--</div>
+                <div className="font-mono font-medium">{eta}</div>
               </div>
             </div>
           </div>
